@@ -3,7 +3,9 @@
 #include <thread>
 #include <mutex>
 #include <queue>
+#include <functional>
 #include <boost/beast.hpp>
+#include <boost/algorithm/string.hpp>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -18,6 +20,7 @@ namespace webserverlibhelpers
     {
         static constexpr std::ostream &out = std::cout;
         static constexpr std::ostream &err = std::cerr;
+        constexpr static const char* slash = "/";
     };
 
     template <>
@@ -25,30 +28,8 @@ namespace webserverlibhelpers
     {
         static constexpr std::wostream &out = std::wcout;
         static constexpr std::wostream &err = std::wcerr;
+        constexpr static const wchar_t* slash = L"/";
     };
-
-    template <class Id>
-    struct Prop
-    {
-        typename Id::ValueType _value;
-        Prop() {}
-        Prop(Prop& other) : _value(other._value) { }
-        Prop(const Prop& other) : _value(other._value) { }
-        Prop(typename Id::ValueType value) : _value(value) { }
-        operator typename Id::ValueType() const { return _value; }
-    };
-
-    template <class ValueT>
-    struct ClassId
-    { typedef ValueT ValueType; };
-
-    struct AddressId      : ClassId<std::string   > { };
-    struct PortId         : ClassId<unsigned short> { };
-    struct ThreadsCountId : ClassId<unsigned int  > { };
-
-    typedef Prop<AddressId     > Address;
-    typedef Prop<PortId        > Port;
-    typedef Prop<ThreadsCountId> ThreadsCount;
 
     template <class Needed, class NotMatched, class ... Nexts>
     struct Selector
@@ -62,39 +43,93 @@ namespace webserverlibhelpers
     {
         static const Needed& Result(const Needed& needed, const Nexts& ...)
         { return needed; }
-    };
-
-    template <class Needed, class ... Args>
-    static const Needed& Select(Args&& ... args)
-    { return Selector<Needed, Args ...>::Result(args ...); }
+    };  
 }
 
 template <class CharT>
 struct webserverlib
 {
-    typedef std::basic_string<CharT> StringT;
-
+    typedef std::basic_string<CharT> string;
+    typedef std::basic_ostringstream<CharT> ostringstream;
+    typedef webserverlibhelpers::CharTypeSpecific<CharT> CharTypeSpecific;
+    static constexpr std::basic_ostream<CharT> &out = CharTypeSpecific::out;
+    static constexpr std::basic_ostream<CharT> &err = CharTypeSpecific::err;
     using BodyT = http::basic_dynamic_body<beast::basic_multi_buffer<std::allocator<CharT>>>;
     using Request = http::request<BodyT>;
     using Response = http::response<BodyT>;
 
-    typedef webserverlibhelpers::Prop<webserverlibhelpers::AddressId     > Address;
-    typedef webserverlibhelpers::Prop<webserverlibhelpers::PortId        > Port;
-    typedef webserverlibhelpers::Prop<webserverlibhelpers::ThreadsCountId> Threads;
+    template <class Id>
+    struct Prop
+    {  
+        typedef typename Id::ValueType ValueType;
+        ValueType _value;
+        Prop() {}
+
+        Prop(typename Id::ValueType value) : _value(value) { }
+
+        Prop(Prop& other) : _value(other._value) { }
+
+        Prop(const Prop& other) : _value(other._value) { }
+
+        template <class T, class U, class ... Args>
+        Prop(const T& t, const U& u, const Args& ... args) :
+        _value(webserverlibhelpers::Selector<Prop<Id>, T, U, Args ...>::Result(t, u, args ...)._value)
+        { }
+
+    };
+    
+    class HttpRequestContext
+    {
+    protected:
+        Request            _request;
+        std::queue<string> _route;
+        ostringstream      _responseStream;
+    public:
+        Request&            request        = _request;
+        std::queue<string>& route          = _route;
+        ostringstream&      responseStream = _responseStream;
+
+        HttpRequestContext(http::request<http::basic_dynamic_body<beast::basic_multi_buffer<std::allocator<CharT>>>> request) :
+        _request(std::move(request))
+        {
+            std::vector<std::basic_string<CharT>> path;
+
+            boost::split(path, request.target(), boost::is_any_of(CharTypeSpecific::slash));
+
+            for(auto i = ++path.begin(); i != path.end(); i++)
+                route.push(*i);
+        }
+
+        string GetPathStep()
+        {
+            string result(std::move(route.front()));
+            route.pop();
+            return result;
+        }
+    };
 
     class WebServer
     {
+    public:
+        template <class ValueT>
+        struct ClassId
+        { typedef ValueT ValueType; };
+
+        struct AddressId      : ClassId<std::string   > { };
+        struct PortId         : ClassId<unsigned short> { };
+        struct ThreadsCountId : ClassId<unsigned int  > { };
+        struct RequestProcId  :
+        ClassId<std::function<void(HttpRequestContext&)> > { };
+
+        typedef Prop<AddressId     > Address;
+        typedef Prop<PortId        > Port;
+        typedef Prop<ThreadsCountId> Threads;
+        typedef Prop<RequestProcId > RequestProc;
     protected:
-        template <class ... Types>
-        using Selector = webserverlibhelpers::Selector<Types ...>;
-
-        typedef webserverlibhelpers::CharTypeSpecific<CharT> CharTypeSpecific;
-        static constexpr std::basic_ostream<CharT> &out = CharTypeSpecific::out;
-        static constexpr std::basic_ostream<CharT> &err = CharTypeSpecific::err;
-
-        std::string    _address;
-        unsigned short _port;
-        unsigned int   _threads;
+        typename Address    ::ValueType _address;
+        typename Port       ::ValueType _port;
+        typename Threads    ::ValueType _threads;
+        typename RequestProc::ValueType _requestProc;
 
         std::queue<tcp::socket> _acceptedConnectionsQueue;
         std::mutex _connectionsQueueMutex;
@@ -174,7 +209,11 @@ struct webserverlib
                     Response response;
                     response.version(request.version());
 
-                    beast::ostream(response.body()) << ".!.";
+                    HttpRequestContext httpRequestContext(std::move(request));
+                    
+                    _requestProc(httpRequestContext);
+
+                    beast::ostream(response.body()) << httpRequestContext.responseStream.str();
 
                     http::write(
                         socket,
@@ -191,10 +230,11 @@ struct webserverlib
 
     public:
         template <class ... Args>
-        WebServer(Args&& ... args) :
-        _address (webserverlibhelpers::Select<Address>(args ..., Address("0.0.0.0"))),
-        _port    (webserverlibhelpers::Select<Port   >(args ..., Port          (80))),
-        _threads (webserverlibhelpers::Select<Threads>(args ..., Threads        (1)))
+        WebServer(const Args& ... args) :
+        _address    (Address(args ..., Address("0.0.0.0"))._value),
+        _port       (Port   (args ..., Port          (80))._value),
+        _threads    (Threads(args ..., Threads        (1))._value),
+        _requestProc(RequestProc(args ...)._value)
         {
             std::cout << "address : " << _address << std::endl;
             std::cout << "port    : " << _port    << std::endl;
