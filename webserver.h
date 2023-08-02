@@ -4,6 +4,7 @@
 #include <thread>
 #include <mutex>
 #include <queue>
+#include <map>
 #include <functional>
 #include <utility>
 #include <boost/beast.hpp>
@@ -68,19 +69,25 @@ namespace webserverlibhelpers
     };
 }
 
-class NotFoundException : public std::exception
+namespace webserverexceptions
 {
-public:
-    const char* what() const noexcept override
-    { return "404 - not found"; }
-};
+    class WebServerException : public std::exception
+    { };
 
-class BadRequestException : public std::exception
-{
-public:
-    const char* what() const noexcept override
-    { return "bad request"; }
-};
+    class NotFoundException : public WebServerException
+    {
+    public:
+        const char* what() const noexcept override
+        { return "404 - not found"; }
+    };
+
+    class BadRequestException : public WebServerException
+    {
+    public:
+        const char* what() const noexcept override
+        { return "bad request"; }
+    };
+}
 
 using Body     = http::dynamic_body;
 using Request  = http::request<Body>;
@@ -125,7 +132,7 @@ namespace routing
 
     class RouterNode : public Router
     {
-        std::map<std::string, Router*> routes;
+        std::map<std::string, routing::Router*> routes;
     public:
         RouterNode(std::initializer_list<std::pair<const std::string, Router*>> init) :
         routes(init)
@@ -147,7 +154,7 @@ namespace routing
             std::string pathStep = context.GetPathStep();
             auto i = routes.find(pathStep);
             if(i == routes.end())
-                throw NotFoundException();
+                throw webserverexceptions::NotFoundException();
             return i->second->GetEndPoint(context);
         }
     };
@@ -179,7 +186,7 @@ namespace routing
                 std::string pathStep = context.route.front();
                 context.route.pop();
                 if(pathStep == "..")
-                    throw BadRequestException();
+                    throw webserverexceptions::BadRequestException();
                 pathStringStream << "/" << pathStep;
             }
 
@@ -202,20 +209,22 @@ namespace routing
         }
     };
 
-    template <class Callable, class Controller>
+    template <class Method>
     class ApiEndPoint : public RouterEndPoint
     {
-        Controller controller;
-        Callable   callable;
+        Method method;
     public:
-        ApiEndPoint(Controller controller, Callable callable)  :
-        controller(controller),
-        callable  (callable)
+        ApiEndPoint(Method method) :
+        method(std::move(method))
         { }
 
-        void SendResponse(HttpRequestContext& context) override
-        { (controller->*callable)(context); }
+        void ProcessRequest(HttpRequestContext& context) override
+        { method(context); }
     };
+
+    template <class Method>
+    ApiEndPoint<Method>* CreateApiEndPoint(Method method)
+    { return new ApiEndPoint<Method>(std::move(method)); }
 }
 
 
@@ -226,33 +235,39 @@ protected:
     struct ClassId
     { typedef ValueT ValueType; };
 
-    struct AddressId      : ClassId<std::string     > { };
-    struct PortId         : ClassId<unsigned short  > { };
-    struct ThreadsCountId : ClassId<unsigned int    > { };
-    struct RouterId       : ClassId<routing::Router*> { };
+    struct AddressId : ClassId<std::string     > { };
+    struct PortId    : ClassId<unsigned short  > { };
+    struct ThreadsId : ClassId<unsigned int    > { };
 public:
-    typedef webserverlibhelpers::Prop<AddressId     > Address;
-    typedef webserverlibhelpers::Prop<PortId        > Port;
-    typedef webserverlibhelpers::Prop<ThreadsCountId> Threads;
+    typedef webserverlibhelpers::Prop<AddressId> SetAddress;
+    typedef webserverlibhelpers::Prop<PortId   > SetPort;
+    typedef webserverlibhelpers::Prop<ThreadsId> SetThreads;
 
-    class Router
+    class SetRouter
     {
-        routing::Router* ptrRouter;
+        mutable routing::Router* ptrRouter;
     public:
-        Router(Router&& other)
-        { std::swap(ptrRouter, other.ptrRouter); }
+        SetRouter(SetRouter&& other)
+        {
+            ptrRouter = other.ptrRouter;
+            other.ptrRouter = nullptr;
+        }
 
-        Router(routing::Router* ptrRouter) : ptrRouter(ptrRouter) { }
+        SetRouter(routing::Router* ptrRouter) : ptrRouter(ptrRouter) { }
 
         operator routing::Router*() const
-        { return ptrRouter; }
-        ~Router() { delete ptrRouter; }
+        {
+            routing::Router* result = ptrRouter;
+            ptrRouter = nullptr;
+            return result;
+        }
+        ~SetRouter() { delete ptrRouter; }
     };
 
 protected:
-    typename Address    ::ValueType address;
-    typename Port       ::ValueType port;
-    typename Threads    ::ValueType threads;
+    typename SetAddress    ::ValueType address;
+    typename SetPort       ::ValueType port;
+    typename SetThreads    ::ValueType threads;
     routing::Router*                ptrRouter;
 
 public:
@@ -337,7 +352,10 @@ public:
                 
                 try
                 {
-                    ptrRouter->GetEndPoint(httpRequestContext).ProcessRequest(httpRequestContext);
+                    routing::Router& router = *ptrRouter;
+                    routing::RouterEndPoint& endPoint= router.GetEndPoint(httpRequestContext);
+                    endPoint.ProcessRequest(httpRequestContext);
+                    //ptrRouter->GetEndPoint(httpRequestContext).ProcessRequest(httpRequestContext);
                 }
                 catch(const std::exception exception)
                 {
@@ -362,12 +380,11 @@ public:
 public:
     template <class ... Args>
     WebServer(const Args& ... args) :
-    address    (Address(args ..., Address("0.0.0.0")).value),
-    port       (Port   (args ..., Port          (80)).value),
-    threads    (Threads(args ..., Threads        (1)).value),
-    ptrRouter  (std::move(webserverlibhelpers::Selector<Router, Args ..., Router>::Result(args ..., Router(new routing::RouterNode {{"", new routing::StaticDocumentEndPoint("index.html")}}))))
+    address    (SetAddress(args ..., SetAddress("0.0.0.0")).value),
+    port       (SetPort   (args ..., SetPort          (80)).value),
+    threads    (SetThreads(args ..., SetThreads        (1)).value),
+    ptrRouter  (webserverlibhelpers::Selector<SetRouter, Args ..., SetRouter>::Result(args ..., SetRouter(new routing::StaticDocumentEndPoint("index.html"))))
     {
-        ptrRouter = ptrRouter ? ptrRouter : ;
         std::cout << "address : " << address << std::endl;
         std::cout << "port    : " << port    << std::endl;
         std::cout << "threads : " << threads << std::endl;
