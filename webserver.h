@@ -96,26 +96,31 @@ using Response = http::response<Body>;
 class HttpRequestContext
 {
 public:
-    Request                 request;
+    Request&                request;
     std::queue<std::string> route;
     std::stringstream       responseStream;
 
-    HttpRequestContext(Request request) :
-    request(std::move(request))
+    HttpRequestContext(Request& request) :
+    request(request)
     {
         std::vector<std::string> path;
-
         boost::split(path, request.target(), boost::is_any_of("/"));
-
         for(auto i = ++path.begin(); i != path.end(); i++)
-            route.push(*i);
+            if(*i != "")
+                route.push(*i);
     }
 
     std::string GetPathStep()
     {
-        std::string result(std::move(route.front()));
-        route.pop();
-        return std::move(result);
+        if(route.empty())
+            return "";
+        struct Poper
+        {
+            std::queue<std::string>& queue;
+            Poper(std::queue<std::string>& queue) : queue(queue) { }
+            ~Poper() { queue.pop(); }
+        } poper(route);
+        return std::move(route.front());
     }
 };
 
@@ -130,6 +135,7 @@ namespace routing
         virtual ~Router() { }
     };
 
+    template <class ... Routers>
     class RouterNode : public Router
     {
         std::map<std::string, routing::Router*> routes;
@@ -225,6 +231,31 @@ namespace routing
     template <class Method>
     ApiEndPoint<Method>* CreateApiEndPoint(Method method)
     { return new ApiEndPoint<Method>(std::move(method)); }
+    //---------------------------------------------------------------------------
+    template <class Controller>
+    class ApiControllerEndPoint : public RouterEndPoint
+    {
+        Controller* ptrController;
+        typedef void (Controller::*PtrMethod)(HttpRequestContext&);
+        PtrMethod ptrMethod;
+    public:
+        ApiControllerEndPoint(PtrMethod ptrMethod, Controller* ptrController = nullptr) :
+        ptrController(ptrController),
+        ptrMethod(ptrMethod)
+        { }
+
+        void ProcessRequest(HttpRequestContext& context) override
+        {
+            Controller* controller = nullptr;
+            ((ptrController ? ptrController : controller = new Controller())->*ptrMethod)(context);
+            delete controller;
+        }
+    };
+
+    template <class Controller>
+    ApiControllerEndPoint<Controller>* CreateApiControllerEndPoint(void(Controller::*method)(HttpRequestContext&))
+    { return new ApiControllerEndPoint<Controller>(method); }
+    //---------------------------------------------------------------------------
 }
 
 
@@ -345,19 +376,18 @@ public:
                     buffer,
                     request);
 
+                std::cout << "rquest processor: target: " << request.target() << std::endl;
+
                 Response response;
                 response.version(request.version());
 
-                HttpRequestContext httpRequestContext(std::move(request));
+                HttpRequestContext httpRequestContext(request);
                 
                 try
                 {
-                    routing::Router& router = *ptrRouter;
-                    routing::RouterEndPoint& endPoint= router.GetEndPoint(httpRequestContext);
-                    endPoint.ProcessRequest(httpRequestContext);
-                    //ptrRouter->GetEndPoint(httpRequestContext).ProcessRequest(httpRequestContext);
+                    ptrRouter->GetEndPoint(httpRequestContext).ProcessRequest(httpRequestContext);
                 }
-                catch(const std::exception exception)
+                catch(const std::exception& exception)
                 {
                     std::cerr << "request process error: " << exception.what() << std::endl;
                 }
