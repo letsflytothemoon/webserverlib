@@ -8,6 +8,7 @@
 #include <functional>
 #include <utility>
 #include <memory>
+#include <regex>
 #include <boost/beast.hpp>
 #include <boost/algorithm/string.hpp>
 
@@ -52,7 +53,6 @@ namespace webserverlib
             Prop(const T& t, const U& u, const Args& ... args) :
             value(webserverlibhelpers::Selector<Prop<Id>, T, U, Args ...>::Result(t, u, args ...).value)
             { }
-
         };
     }
 
@@ -83,9 +83,10 @@ namespace webserverlib
     class HttpRequestContext
     {
     public:
-        Request&                request;
-        std::queue<std::string> route;
-        std::stringstream       responseStream;
+        Request&                           request;
+        std::queue<std::string>            route;
+        std::stringstream                  responseStream;
+        std::map<http::field, std::string> headers;
 
         HttpRequestContext(Request& request) :
         request(request)
@@ -170,8 +171,9 @@ namespace webserverlib
                         throw webserverexceptions::BadRequestException();
                     pathStringStream << "/" << pathStep;
                 }
+                std::string fullPath = pathStringStream.str();
 
-                std::ifstream fstream(pathStringStream.str());
+                std::ifstream fstream(fullPath);
                 context.responseStream << fstream.rdbuf();
             }
         };
@@ -216,9 +218,7 @@ namespace webserverlib
             {  }
 
             void ProcessRequest(HttpRequestContext& context) override
-            {
-                //Controller* ptr = ptrController;
-                (ptrController.get()->*ptrMethod)(context); }
+            { (ptrController.get()->*ptrMethod)(context); }
         };
     }
 
@@ -231,6 +231,12 @@ namespace webserverlib
         operator std::shared_ptr<routing::RouterNode>() const
         { return std::make_shared<routing::RouterNode>(init); }
     };
+
+    std::shared_ptr<routing::StaticDocumentEndPoint> StaticDocumentEndPoint(std::string fileName)
+    { return std::make_shared<routing::StaticDocumentEndPoint>(std::move(fileName)); }
+
+    std::shared_ptr<routing::StaticDirectoryEndPoint> StaticDirectoryEndPoint(std::string dirName)
+    { return std::make_shared<routing::StaticDirectoryEndPoint>(std::move(dirName)); }
 
     template <class Method>
     std::shared_ptr<routing::ApiEndPoint<Method>> ApiEndPoint(Method method)
@@ -369,17 +375,16 @@ namespace webserverlib
                     {
                         std::cerr << "request process error: " << exception.what() << std::endl;
                     }
-
-
+                    
                     beast::ostream(response.body()) << httpRequestContext.responseStream.str();
-
+                    
                     http::write(
                         socket,
                         response);
 
                     socket.shutdown(tcp::socket::shutdown_send);
                 }
-                catch (const std::exception exception)
+                catch (const std::exception& exception)
                 {
                     std::cerr << "request process error: " << exception.what() << std::endl;
                 }
