@@ -368,14 +368,13 @@ namespace webserverlib
                     HttpRequestContext httpRequestContext(request);
                     
                     try
-                    {
-                        ptrRouter->GetEndPoint(httpRequestContext).ProcessRequest(httpRequestContext);
-                    }
+                    { ptrRouter->GetEndPoint(httpRequestContext).ProcessRequest(httpRequestContext); }
                     catch(const std::exception& exception)
-                    {
-                        std::cerr << "request process error: " << exception.what() << std::endl;
-                    }
+                    { std::cerr << "request process error: " << exception.what() << std::endl; }
                     
+                    for(auto i = httpRequestContext.headers.begin(); i != httpRequestContext.headers.end(); i++)
+                        response.set(i->first, i->second);
+
                     beast::ostream(response.body()) << httpRequestContext.responseStream.str();
                     
                     http::write(
