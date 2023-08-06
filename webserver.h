@@ -87,15 +87,17 @@ namespace webserverlib
         std::queue<std::string>            route;
         std::stringstream                  responseStream;
         std::map<http::field, std::string> headers;
-
-        HttpRequestContext(Request& request) :
-        request(request)
+        std::string                        remote_address;
+        HttpRequestContext(Request& request, std::string remote_address) :
+        request(request),
+        remote_address(std::move(remote_address))
         {
             std::vector<std::string> path;
             boost::split(path, request.target(), boost::is_any_of("/"));
             for(auto i = ++path.begin(); i != path.end(); i++)
                 if(*i != "")
                     route.push(*i);
+            
         }
 
         std::string GetPathStep()
@@ -364,8 +366,8 @@ namespace webserverlib
 
                     Response response;
                     response.version(request.version());
-
-                    HttpRequestContext httpRequestContext(request);
+                    
+                    HttpRequestContext httpRequestContext(request, std::move(socket.remote_endpoint().address().to_string()));
                     
                     try
                     { ptrRouter->GetEndPoint(httpRequestContext).ProcessRequest(httpRequestContext); }
