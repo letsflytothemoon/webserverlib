@@ -129,9 +129,12 @@ namespace webserverlib
         {
             std::map<std::string, std::shared_ptr<Router>> routes;
         public:
-            RouterNode(std::initializer_list<std::pair<const std::string, std::shared_ptr<Router>>> init) :
-            routes(init)
-            { }
+            template <class Iterator>
+            RouterNode(Iterator begin, Iterator end)
+            {
+                for (Iterator i = begin; i != end; i++)
+                    routes[i->first] = i->second;
+            }
 
             RouterEndPoint& GetEndPoint(HttpRequestContext& context) override
             {
@@ -194,17 +197,16 @@ namespace webserverlib
             }
         };
 
-        template <class Method>
         class ApiEndPoint : public RouterEndPoint
         {
-            Method method;
+            std::function<void(HttpRequestContext&)> method;
         public:
-            ApiEndPoint(Method method) :
+            ApiEndPoint(std::function<void(HttpRequestContext&)> method) :
             method(method)
             { }
 
             void ProcessRequest(HttpRequestContext& context) override
-            { std::invoke(method, context); }
+            { method(context); }
         };
 
         template <class Controller>
@@ -224,29 +226,56 @@ namespace webserverlib
         };
     }
 
-    struct Router
+    struct StaticDocumentEndPoint
     {
-        std::initializer_list<std::pair<const std::string, std::shared_ptr<routing::Router>>> init;
-        Router(std::initializer_list<std::pair<const std::string, std::shared_ptr<routing::Router>>> init) : init(init)
-        { }
-
-        operator std::shared_ptr<routing::RouterNode>() const
-        { return std::make_shared<routing::RouterNode>(init); }
+        std::string fileName;
     };
 
-    std::shared_ptr<routing::StaticDocumentEndPoint> StaticDocumentEndPoint(std::string fileName)
-    { return std::make_shared<routing::StaticDocumentEndPoint>(std::move(fileName)); }
+    struct ApiEndPoint
+    {
+        void (*method)(HttpRequestContext&);
+    };
 
-    std::shared_ptr<routing::StaticDirectoryEndPoint> StaticDirectoryEndPoint(std::string dirName)
-    { return std::make_shared<routing::StaticDirectoryEndPoint>(std::move(dirName)); }
+    class Router
+    {
+        std::function<std::shared_ptr<routing::Router>()> GetRouter;
+    public:
+        Router(std::initializer_list<std::pair<const std::string, const Router>> init) :
+            GetRouter([init]()
+                {
+                    std::list<std::pair<std::string, std::shared_ptr<routing::Router>>> routes;
+                    for (auto i = init.begin(); i != init.end(); i++)
+                        routes.emplace_back(std::make_pair(
+                            i->first,
+                            i->second.GetRouter()
+                        ));
+                    return std::make_shared<routing::RouterNode>(routes.begin(), routes.end());
+                })
+        { }
 
-    template <class Method>
-    std::shared_ptr<routing::ApiEndPoint<Method>> ApiEndPoint(Method method)
-    { return std::make_shared<routing::ApiEndPoint<Method>>(method); }
+        Router(ApiEndPoint apiEndPointCreateParams) :
+            GetRouter([apiEndPointCreateParams]()
+                {
+                    return std::make_shared<routing::ApiEndPoint>(apiEndPointCreateParams.method);
+                })
+        { }
 
-    template <class Controller>
-    std::shared_ptr<routing::ApiControllerEndPoint<Controller>> ApiControllerEndPoint(void(Controller::*method)(HttpRequestContext&))
-    { return std::make_shared<routing::ApiControllerEndPoint<Controller>>(method); }
+        Router(void (*method)(HttpRequestContext&)) :
+            GetRouter([method]()
+                {
+                    return std::make_shared<routing::ApiEndPoint>(method);
+                })
+        {}
+
+        Router(StaticDocumentEndPoint staticDocumentEndPointCreateParams) :
+            GetRouter([staticDocumentEndPointCreateParams]()
+                {
+                    return std::make_shared<routing::StaticDocumentEndPoint>(staticDocumentEndPointCreateParams.fileName);
+                })
+        {}
+        operator std::shared_ptr<routing::Router>() const
+        { return GetRouter(); }
+    };
 
     class WebServer
     {
@@ -269,7 +298,7 @@ namespace webserverlib
         public:
             SetRouter(routing::Router* ptrRouter) : ptrRouter(ptrRouter) { }
 
-            SetRouter(std::shared_ptr<routing::RouterNode> router)
+            SetRouter(std::shared_ptr<routing::Router> router)
             {
                 ptrRouter = router;
             }
