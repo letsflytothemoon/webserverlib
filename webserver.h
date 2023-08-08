@@ -212,17 +212,18 @@ namespace webserverlib
         template <class Controller>
         class ApiControllerEndPoint : public RouterEndPoint
         {
-            std::unique_ptr<Controller> ptrController;
             typedef void (Controller::*PtrMethod)(HttpRequestContext&);
             PtrMethod ptrMethod;
         public:
             ApiControllerEndPoint(PtrMethod ptrMethod) :
-            ptrMethod(ptrMethod),
-            ptrController(std::make_unique<Controller>())
+            ptrMethod(ptrMethod)
             {  }
 
             void ProcessRequest(HttpRequestContext& context) override
-            { (ptrController.get()->*ptrMethod)(context); }
+            {
+                Controller controller;
+                (controller.*ptrMethod)(context);
+            }
         };
     }
 
@@ -234,6 +235,12 @@ namespace webserverlib
     struct ApiEndPoint
     {
         void (*method)(HttpRequestContext&);
+    };
+
+    template <class Controller>
+    struct ApiControllerEndPoint
+    {
+        void (Controller::* method)(HttpRequestContext&);
     };
 
     class Router
@@ -260,12 +267,13 @@ namespace webserverlib
                 })
         { }
 
-        Router(void (*method)(HttpRequestContext&)) :
+        template <class Controller>
+        Router(void (Controller::* method)(HttpRequestContext&)) :
             GetRouter([method]()
                 {
-                    return std::make_shared<routing::ApiEndPoint>(method);
+                    return std::make_shared<routing::ApiControllerEndPoint>(method);
                 })
-        {}
+        { }
 
         Router(StaticDocumentEndPoint staticDocumentEndPointCreateParams) :
             GetRouter([staticDocumentEndPointCreateParams]()
@@ -273,6 +281,7 @@ namespace webserverlib
                     return std::make_shared<routing::StaticDocumentEndPoint>(staticDocumentEndPointCreateParams.fileName);
                 })
         {}
+
         operator std::shared_ptr<routing::Router>() const
         { return GetRouter(); }
     };
