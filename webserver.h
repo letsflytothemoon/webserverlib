@@ -56,26 +56,6 @@ namespace webserverlib
         };
     }
 
-    namespace webserverexceptions
-    {
-        class WebServerException : public std::exception
-        { };
-
-        class NotFoundException : public WebServerException
-        {
-        public:
-            const char* what() const noexcept override
-            { return "404 - not found"; }
-        };
-
-        class BadRequestException : public WebServerException
-        {
-        public:
-            const char* what() const noexcept override
-            { return "bad request"; }
-        };
-    }
-
     using Body     = http::dynamic_body;
     using Request  = http::request<Body>;
     using Response = http::response<Body>;
@@ -140,8 +120,8 @@ namespace webserverlib
             {
                 std::string pathStep = context.GetPathStep();
                 auto i = routes.find(pathStep);
-                if(i == routes.end())
-                    throw webserverexceptions::NotFoundException();
+                if (i == routes.end())
+                    throw http::status::not_found;
                 return i->second->GetEndPoint(context);
             }
         };
@@ -172,8 +152,8 @@ namespace webserverlib
 
                     std::string pathStep = context.route.front();
                     context.route.pop();
-                    if(pathStep == "..")
-                        throw webserverexceptions::BadRequestException();
+                    if (pathStep == "..")
+                        throw http::status::bad_request;
                     pathStringStream << "/" << pathStep;
                 }
                 std::string fullPath = pathStringStream.str();
@@ -408,14 +388,24 @@ namespace webserverlib
                     HttpRequestContext httpRequestContext(request, std::move(socket.remote_endpoint().address().to_string()));
                     
                     try
-                    { ptrRouter->GetEndPoint(httpRequestContext).ProcessRequest(httpRequestContext); }
-                    catch(const std::exception& exception)
-                    { std::cerr << "request process error: " << exception.what() << std::endl; }
-                    
-                    for(auto i = httpRequestContext.headers.begin(); i != httpRequestContext.headers.end(); i++)
-                        response.set(i->first, i->second);
+                    {
+                        ptrRouter->GetEndPoint(httpRequestContext).ProcessRequest(httpRequestContext);
+                        response.result(beast::http::status::ok);
+                        for (auto i = httpRequestContext.headers.begin(); i != httpRequestContext.headers.end(); i++)
+                            response.set(i->first, i->second);
 
-                    beast::ostream(response.body()) << httpRequestContext.responseStream.str();
+                        beast::ostream(response.body()) << httpRequestContext.responseStream.str();
+                    }
+                    catch (beast::http::status status)
+                    {
+                        response.result(status);
+                        beast::ostream(response.body()) << beast::http::obsolete_reason(status);
+                    }
+                    catch (const std::exception&)
+                    {
+                        response.result(http::status::internal_server_error);
+                        beast::ostream(response.body()) << beast::http::obsolete_reason(http::status::internal_server_error);
+                    }
                     
                     http::write(
                         socket,
