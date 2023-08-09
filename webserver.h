@@ -212,6 +212,11 @@ namespace webserverlib
         std::string fileName;
     };
 
+    struct StaticDirectoryEndPoint
+    {
+        std::string dirName;
+    };
+
     struct ApiEndPoint
     {
         void (*method)(HttpRequestContext&);
@@ -248,10 +253,10 @@ namespace webserverlib
         { }
 
         template <class Controller>
-        Router(void (Controller::* method)(HttpRequestContext&)) :
-            GetRouter([method]()
+        Router(ApiControllerEndPoint<Controller> apiControllerEndPointCreateParams) :
+            GetRouter([apiControllerEndPointCreateParams]()
                 {
-                    return std::make_shared<routing::ApiControllerEndPoint>(method);
+                    return std::make_shared<routing::ApiControllerEndPoint<Controller>>(apiControllerEndPointCreateParams.method);
                 })
         { }
 
@@ -260,7 +265,14 @@ namespace webserverlib
                 {
                     return std::make_shared<routing::StaticDocumentEndPoint>(staticDocumentEndPointCreateParams.fileName);
                 })
-        {}
+        { }
+
+        Router(StaticDirectoryEndPoint staticDirectoryEndPointCreateParams) :
+            GetRouter([staticDirectoryEndPointCreateParams]()
+                {
+                    return std::make_shared<routing::StaticDirectoryEndPoint>(staticDirectoryEndPointCreateParams.dirName);
+                })
+        { }
 
         operator std::shared_ptr<routing::Router>() const
         { return GetRouter(); }
