@@ -64,10 +64,9 @@ namespace webserverlib
     {
     public:
         Request&                           request;
-        std::queue<std::string>            route;
-        std::stringstream                  responseStream;
-        std::map<http::field, std::string> headers;
         std::string                        remote_address;
+        std::queue<std::string>            route;
+
         HttpRequestContext(Request& request, std::string remote_address) :
         request(request),
         remote_address(std::move(remote_address))
@@ -80,7 +79,7 @@ namespace webserverlib
             
         }
 
-        std::string GetPathStep()
+        std::string GetRouteStep()
         {
             if(route.empty())
                 return "";
@@ -94,188 +93,53 @@ namespace webserverlib
         }
     };
 
-    namespace routing
-    {
-        class RouterEndPoint;
-
-        class Router
-        {
-        public:
-            virtual RouterEndPoint& GetEndPoint(HttpRequestContext&) = 0;
-            virtual ~Router() { }
-        };
-        
-        class RouterNode : public Router
-        {
-            std::map<std::string, std::shared_ptr<Router>> routes;
-        public:
-            template <class Iterator>
-            RouterNode(Iterator begin, Iterator end)
-            {
-                for (Iterator i = begin; i != end; i++)
-                    routes[i->first] = i->second;
-            }
-
-            RouterEndPoint& GetEndPoint(HttpRequestContext& context) override
-            {
-                std::string pathStep = context.GetPathStep();
-                auto i = routes.find(pathStep);
-                if (i == routes.end())
-                    throw http::status::not_found;
-                return i->second->GetEndPoint(context);
-            }
-        };
-
-        class RouterEndPoint : public Router
-        {
-        public:
-            RouterEndPoint& GetEndPoint(HttpRequestContext& context) override
-            { return *this; }
-
-            virtual void ProcessRequest(HttpRequestContext&) = 0;
-        };
-
-        class StaticDirectoryEndPoint : public RouterEndPoint
-        {
-            std::string dirName;
-        public:
-            StaticDirectoryEndPoint(std::string dirName) : dirName(std::move(dirName))
-            { }
-
-            void ProcessRequest(HttpRequestContext& context) override
-            {
-                std::stringstream pathStringStream;
-                pathStringStream << dirName;
-
-                while(!context.route.empty())
-                {
-
-                    std::string pathStep = context.route.front();
-                    context.route.pop();
-                    if (pathStep == "..")
-                        throw http::status::bad_request;
-                    pathStringStream << "/" << pathStep;
-                }
-                std::string fullPath = pathStringStream.str();
-
-                std::ifstream fstream(fullPath);
-                context.responseStream << fstream.rdbuf();
-            }
-        };
-
-        class StaticDocumentEndPoint : public RouterEndPoint
-        {
-            std::string fileName;
-        public:
-            StaticDocumentEndPoint(std::string fileName) : fileName(std::move(fileName))
-            { }
-            
-            void ProcessRequest(HttpRequestContext& context) override
-            {
-                std::ifstream fstream(fileName);
-                context.responseStream << fstream.rdbuf();
-            }
-        };
-
-        class ApiEndPoint : public RouterEndPoint
-        {
-            std::function<void(HttpRequestContext&)> method;
-        public:
-            ApiEndPoint(std::function<void(HttpRequestContext&)> method) :
-            method(method)
-            { }
-
-            void ProcessRequest(HttpRequestContext& context) override
-            { method(context); }
-        };
-
-        template <class Controller>
-        class ApiControllerEndPoint : public RouterEndPoint
-        {
-            typedef void (Controller::*PtrMethod)(HttpRequestContext&);
-            PtrMethod ptrMethod;
-        public:
-            ApiControllerEndPoint(PtrMethod ptrMethod) :
-            ptrMethod(ptrMethod)
-            {  }
-
-            void ProcessRequest(HttpRequestContext& context) override
-            {
-                Controller controller;
-                (controller.*ptrMethod)(context);
-            }
-        };
-    }
-
-    struct StaticDocumentEndPoint
-    {
-        std::string fileName;
-    };
-
-    struct StaticDirectoryEndPoint
-    {
-        std::string dirName;
-    };
-
-    struct ApiEndPoint
-    {
-        void (*method)(HttpRequestContext&);
-    };
-
-    template <class Controller>
-    struct ApiControllerEndPoint
-    {
-        void (Controller::* method)(HttpRequestContext&);
-    };
+    typedef std::function<Response(HttpRequestContext&)> Action;
 
     class Router
     {
-        std::function<std::shared_ptr<routing::Router>()> GetRouter;
+         Action action;
     public:
-        Router(std::initializer_list<std::pair<const std::string, const Router>> init) :
-            GetRouter([init]()
-                {
-                    std::list<std::pair<std::string, std::shared_ptr<routing::Router>>> routes;
-                    for (auto i = init.begin(); i != init.end(); i++)
-                        routes.emplace_back(std::make_pair(
-                            i->first,
-                            i->second.GetRouter()
-                        ));
-                    return std::make_shared<routing::RouterNode>(routes.begin(), routes.end());
-                })
-        { }
+        Response Act(HttpRequestContext& requestContext) const
+        { return action(requestContext); }
 
-        Router(ApiEndPoint apiEndPointCreateParams) :
-            GetRouter([apiEndPointCreateParams]()
-                {
-                    return std::make_shared<routing::ApiEndPoint>(apiEndPointCreateParams.method);
-                })
+        Router(std::initializer_list<std::pair<const std::string, Router>> init)
+        {
+            std::map<std::string, Router> initRoutes;
+            for(auto i = init.begin(); i != init.end(); i++)
+                initRoutes.emplace(std::make_pair(i->first, i->second));
+            
+            action = [routes { std::move(initRoutes) } ](HttpRequestContext& requestContext)
+            {
+                auto routeFindIterator = routes.find(requestContext.GetRouteStep());
+                if(routeFindIterator == routes.end())
+                    throw http::status::not_found;
+                return routeFindIterator->second.Act(requestContext);
+            };
+        }
+
+        template <class A, typename = std::enable_if_t<std::is_convertible_v<A, Action>>>
+        Router(A action) : action(action)
         { }
 
         template <class Controller>
-        Router(ApiControllerEndPoint<Controller> apiControllerEndPointCreateParams) :
-            GetRouter([apiControllerEndPointCreateParams]()
-                {
-                    return std::make_shared<routing::ApiControllerEndPoint<Controller>>(apiControllerEndPointCreateParams.method);
-                })
+        Router(Response(Controller::*action)(HttpRequestContext&)) :
+        action([action](HttpRequestContext& requestContext)
+        {
+            Controller controller;
+            return (controller.*action)(requestContext);
+        })
         { }
 
-        Router(StaticDocumentEndPoint staticDocumentEndPointCreateParams) :
-            GetRouter([staticDocumentEndPointCreateParams]()
-                {
-                    return std::make_shared<routing::StaticDocumentEndPoint>(staticDocumentEndPointCreateParams.fileName);
-                })
+        Router(std::string fileName) :
+        action([fileName](HttpRequestContext& requestContext)
+        {
+            Response response;
+            response.version(requestContext.request.version());
+            std::ifstream fileStream { fileName} ;
+            beast::ostream(response.body()) << fileStream.rdbuf();
+            return response;
+        })
         { }
-
-        Router(StaticDirectoryEndPoint staticDirectoryEndPointCreateParams) :
-            GetRouter([staticDirectoryEndPointCreateParams]()
-                {
-                    return std::make_shared<routing::StaticDirectoryEndPoint>(staticDirectoryEndPointCreateParams.dirName);
-                })
-        { }
-
-        operator std::shared_ptr<routing::Router>() const
-        { return GetRouter(); }
     };
 
     class WebServer
@@ -293,31 +157,11 @@ namespace webserverlib
         typedef webserverlibhelpers::Prop<PortId   > SetPort;
         typedef webserverlibhelpers::Prop<ThreadsId> SetThreads;
 
-        class SetRouter
-        {
-            mutable std::shared_ptr<routing::Router> ptrRouter;
-        public:
-            SetRouter(routing::Router* ptrRouter) : ptrRouter(ptrRouter) { }
-
-            SetRouter(std::shared_ptr<routing::Router> router)
-            {
-                ptrRouter = router;
-            }
-
-            operator std::shared_ptr<routing::Router>() const
-            {
-                std::shared_ptr<routing::Router> result = ptrRouter;
-                ptrRouter = nullptr;
-                return result;
-            }
-            ~SetRouter() { }
-        };
-
     protected:
         typename SetAddress::ValueType   address;
         typename SetPort   ::ValueType   port;
         typename SetThreads::ValueType   threads;
-        std::shared_ptr<routing::Router> ptrRouter;
+        Router                           router;
 
     public:
         std::queue<tcp::socket> _acceptedConnectionsQueue;
@@ -393,20 +237,14 @@ namespace webserverlib
                         socket,
                         buffer,
                         request);
-
-                    Response response;
-                    response.version(request.version());
                     
                     HttpRequestContext httpRequestContext(request, std::move(socket.remote_endpoint().address().to_string()));
                     
+                    Response response;
+
                     try
                     {
-                        ptrRouter->GetEndPoint(httpRequestContext).ProcessRequest(httpRequestContext);
-                        response.result(beast::http::status::ok);
-                        for (auto i = httpRequestContext.headers.begin(); i != httpRequestContext.headers.end(); i++)
-                            response.set(i->first, i->second);
-
-                        beast::ostream(response.body()) << httpRequestContext.responseStream.str();
+                        response = std::move(router.Act(httpRequestContext));
                     }
                     catch (beast::http::status status)
                     {
@@ -415,6 +253,7 @@ namespace webserverlib
                     }
                     catch (const std::exception&)
                     {
+                        //write to log or something
                         response.result(http::status::internal_server_error);
                         beast::ostream(response.body()) << beast::http::obsolete_reason(http::status::internal_server_error);
                     }
@@ -434,10 +273,16 @@ namespace webserverlib
     public:
         template <class ... Args>
         WebServer(const Args& ... args) :
-        address    (SetAddress(args ..., SetAddress("0.0.0.0")).value),
-        port       (SetPort   (args ..., SetPort          (80)).value),
-        threads    (SetThreads(args ..., SetThreads        (1)).value),
-        ptrRouter  (webserverlibhelpers::Selector<SetRouter, Args ..., SetRouter>::Result(args ..., SetRouter(new routing::StaticDocumentEndPoint("index.html"))))
+        address  (SetAddress(args ..., SetAddress("0.0.0.0")).value),
+        port     (SetPort   (args ..., SetPort          (80)).value),
+        threads  (SetThreads(args ..., SetThreads        (1)).value),
+        router   (webserverlibhelpers::Selector<Router, Args ..., Router>::Result(args ..., [](HttpRequestContext& context)
+        {
+            Response response;
+            response.version(context.request.version());
+            beast::ostream(response.body()) << "<!doctype html><html><head><title>it works!</title><body><h1>It works!</h1></body></html>";
+            return response;
+        }))
         {
             std::thread(&WebServer::ListenLoop, this).detach();
             for (unsigned int i = 0; i < threads; i++)
