@@ -91,13 +91,19 @@ namespace webserverlib
             } poper(route);
             return std::move(route.front());
         }
+
+        operator Request&() { return request; }
     };
 
-    typedef std::function<Response(HttpRequestContext&)> Action;
+    struct File
+    { std::string name; };
+
+    struct Directory
+    { std::string name; };
 
     class Router
     {
-         Action action;
+         std::function<Response(HttpRequestContext&)> action;
     public:
         Response Act(HttpRequestContext& requestContext) const
         { return action(requestContext); }
@@ -117,8 +123,9 @@ namespace webserverlib
             };
         }
 
-        template <class A, typename = std::enable_if_t<std::is_convertible_v<A, Action>>>
-        Router(A action) : action(action)
+        template <class Action>
+        Router(Action action, std::enable_if_t<std::is_invocable_v<Action, HttpRequestContext&>, int> = 0) :
+        action(action)
         { }
 
         template <class Controller>
@@ -130,13 +137,30 @@ namespace webserverlib
         })
         { }
 
-        Router(std::string fileName) :
-        action([fileName](HttpRequestContext& requestContext)
+        Router(File file) :
+        action([fileName{std::move(file.name)}](HttpRequestContext& context)
         {
             Response response;
-            response.version(requestContext.request.version());
-            std::ifstream fileStream { fileName} ;
-            beast::ostream(response.body()) << fileStream.rdbuf();
+            response.version(context.request.version());
+            beast::ostream(response.body()) << std::ifstream(fileName).rdbuf();
+            return response;
+        })
+        { }
+
+        Router(Directory directory) :
+        action([dirName{std::move(directory.name)}](HttpRequestContext& context)
+        {
+            Response response;
+            response.version(context.request.version());
+            std::stringstream pathStringStream { dirName };
+            std::string routeStep;
+            while((routeStep = std::move(context.GetRouteStep())) != "")
+            {
+                if(routeStep == "..")
+                    throw http::status::bad_request;
+                pathStringStream << "/" << routeStep;
+            }
+            beast::ostream(response.body()) << std::ifstream(pathStringStream.str()).rdbuf();
             return response;
         })
         { }
