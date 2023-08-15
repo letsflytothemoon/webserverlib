@@ -62,10 +62,10 @@ namespace webserverlib
 
     class HttpRequestContext
     {
+        std::queue<std::string>            route;
     public:
         Request&                           request;
         std::string                        remote_address;
-        std::queue<std::string>            route;
 
         HttpRequestContext(Request& request, std::string remote_address) :
         request(request),
@@ -73,10 +73,9 @@ namespace webserverlib
         {
             std::vector<std::string> path;
             boost::split(path, request.target(), boost::is_any_of("/"));
-            for(auto i = ++path.begin(); i != path.end(); i++)
+            for (auto i = ++path.begin(); i != path.end(); i++)
                 if(*i != "")
                     route.push(*i);
-            
         }
 
         std::string GetRouteStep()
@@ -148,11 +147,12 @@ namespace webserverlib
         { }
 
         Router(Directory directory) :
-        action([dirName{std::move(directory.name)}](HttpRequestContext& context)
+            action([dirName{ std::move(directory.name) }](HttpRequestContext& context)
         {
             Response response;
             response.version(context.request.version());
-            std::stringstream pathStringStream { dirName };
+            std::stringstream pathStringStream;
+            pathStringStream << dirName;
             std::string routeStep;
             while((routeStep = std::move(context.GetRouteStep())) != "")
             {
